@@ -159,17 +159,17 @@ This is created by shifting the fatality series forward by one week within each 
 
 ### Forecasting task
 
-Given historical information up to week $t$, predict:
+Given historical information up to week t, predict:
 
-$$
-\hat{y}_{t+1}
-$$
+```math
+\(\hat{y}_\){t+1}
+```
 
 where $y_t$ is current fatalities and $y_{t+1}$ is next week’s fatalities.
 
 ### Why this is a valid supervised setup
 
-The full weekly panel gives one row per country-week. The feature row at time $t$ contains information from the past (lags, rolling windows, and recent events). The target at that same row is the actual number of fatalities in the next week.
+The full weekly panel gives one row per country-week. The feature row at time t contains information from the past (lags, rolling windows, and recent events). The target at that same row is the actual number of fatalities in the next week.
 
 This is a standard supervised learning framing for a one-step-ahead forecasting problem.
 
@@ -198,9 +198,8 @@ This is the first major transformation because the raw data is an event log, not
 
 The function `build_complete_panel(df)` creates a full grid:
 
-$$
-[\text{all weeks}] \times [\text{all countries}]
-$$
+```math
+\([\text{all weeks}] \times [\text{all countries}] \%\%\)MAGIT_PARSER_PROTECT%%```
 
 This is then reindexed and all missing combinations are filled with zero.
 
@@ -236,17 +235,17 @@ These are generated within each country group using pandas groupby shifts.
 
 For example:
 
-$$
-\text{fatalities\_lag1}_{i,t} = y_{i,t-1}
-$$
+```math
+\(\text{fatalities\_lag1}_\){i,t} = y_{i,t-1}
+```
 
-$$
-\text{fatalities\_lag2}_{i,t} = y_{i,t-2}
-$$
+```math
+\(\text{fatalities\_lag2}_\){i,t} = y_{i,t-2}
+```
 
-$$
-\text{fatalities\_lag3}_{i,t} = y_{i,t-3}
-$$
+```math
+\(\text{fatalities\_lag3}_\){i,t} = y_{i,t-3}
+```
 
 This gives the model recent memory of how violent the country has been over the last few weeks.
 
@@ -259,15 +258,15 @@ The function `add_rolling_features(df)` adds:
 
 These are built from the lagged fatality signal using a 4-week window over the previous periods.
 
-For a country $i$:
+For a country i:
 
-$$
-\mu_{i,t} = \frac{1}{4} \sum_{k=1}^{4} y_{i,t-k}
-$$
+```math
+\(\mu_{i,t} = \frac{1}{4} \sum_\){k=1}^{4} y_{i,t-k}
+```
 
-$$
-\sigma_{i,t} = \sqrt{\frac{1}{4-1} \sum_{k=1}^{4} (y_{i,t-k} - \mu_{i,t})^2}
-$$
+```math
+\(\sigma_{i,t} = \sqrt\){\(\frac{1}{4-1} \sum_\){k=1}^{4} (y_{i,t-k} \(- \mu_\){i,t})^2}
+```
 
 The rolling mean captures recent average intensity, while the rolling standard deviation captures volatility.
 
@@ -279,11 +278,12 @@ The function `add_target(df)` creates:
 
 by shifting fatalities one step forward within each country:
 
-$$
-\text{next\_week\_fatalities}_{i,t} = y_{i,t+1}
-$$
+```math
+\(\text{next\_week\_fatalities}_\){i,t} = y_{i,t+1}
+```
 
 After that, rows with missing target values are dropped, because the target is not available for the final week of the panel.
+
 
 ### 7.4 Feature set used by the main models
 
