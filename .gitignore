@@ -8,3 +8,4 @@ data/raw-data/*.csv
 data/raw-data/*.xlsx
 conflict_forecast_v1.md
 conflict_forecast_v2.md
+models/
