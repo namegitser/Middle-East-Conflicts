@@ -1,793 +1,604 @@
 # Middle East Conflict Forecasting System
 
-This project is a full machine-learning pipeline for forecasting weekly conflict fatalities in the Middle East using historical ACLED-style event data. The repository combines data cleaning, feature engineering, model training, evaluation, explainability, risk classification, temporal validation, and a Streamlit dashboard into one end-to-end workflow.
+A complete, reproducible machine-learning system for forecasting **next-week conflict fatalities** at the country level in the Middle East, using historical ACLED-style event data. The project doesn't just fit a model — it is built to rigorously answer one question:
 
-The main idea is simple but important:
+> **Can recent historical conflict activity predict next week's fatalities well enough to beat a simple "nothing changes" forecast?**
 
-- Start from raw conflict event logs.
-- Convert them into a consistent weekly panel with one row per country-week.
-- Create lag-based and rolling features that capture recent conflict momentum.
-- Train forecasting models to predict next-week fatalities.
-- Compare model performance using explicit metrics.
-- Build a risk layer that flags unusually dangerous weeks.
-- Use explainability tools to understand which signals matter most.
-- Produce outputs for both analysis and a dashboard.
-
-This repository is not just a single model notebook. It is a structured, reproducible forecasting system designed to answer a specific question: can recent historical conflict activity predict next week’s fatalities well enough to beat a simple baseline?
+This README documents not just *what* the code does, but *why* every technical decision was made — the statistics, the ML theory, and the math behind each choice — so that the repository is self-contained as both a working system and a study reference.
 
 ---
 
-## 1. What this project does
+## Table of Contents
 
-At a high level, the repository does the following:
-
-1. Loads raw event data from ACLED-like CSV files.
-2. Aggregates the raw records into a weekly panel at the country level.
-3. Fills missing country-week combinations with zeros so that the data remains consistent for time-series modeling.
-4. Engineers temporal features such as:
-   - lagged fatalities
-   - lagged events
-   - rolling mean and rolling standard deviation of recent fatalities
-5. Builds a supervised learning target:
-   - predict next week’s fatalities from the current week’s historical information
-6. Trains several models:
-   - naive baseline
-   - Ridge regression
-   - Random Forest regression
-7. Evaluates models using MAE and RMSE.
-8. Builds a binary risk classifier that labels weeks as high-risk or normal based on a country-specific percentile threshold.
-9. Implements optional analysis techniques such as:
-   - walk-forward validation
-   - out-of-time testing
-   - SHAP explainability
-   - spatial lag features at ADMIN1 level
-10. Produces dashboard-ready parquet data and a Streamlit app.
-
-The project is therefore both a forecasting system and a modeling workflow for structured conflict data.
+1. [Problem Statement](#1-problem-statement)
+2. [Why Conflict Forecasting Is Hard](#2-why-conflict-forecasting-is-hard)
+3. [Data Source & Core Assumptions](#3-data-source--core-assumptions)
+4. [Repository Architecture](#4-repository-architecture)
+5. [Data Pipeline: Theory & Implementation](#5-data-pipeline-theory--implementation)
+6. [Feature Engineering: Theory & Math](#6-feature-engineering-theory--math)
+7. [Target Variable & Supervised Learning Formulation](#7-target-variable--supervised-learning-formulation)
+8. [Train/Test Splitting & Data Leakage](#8-traintest-splitting--data-leakage)
+9. [Models: Full Theory](#9-models-full-theory)
+10. [Evaluation Metrics: Full Theory](#10-evaluation-metrics-full-theory)
+11. [Risk Classification Layer](#11-risk-classification-layer)
+12. [Explainability: SHAP Theory](#12-explainability-shap-theory)
+13. [Spatial Modeling: Theory](#13-spatial-modeling-theory)
+14. [Validation Strategy: Theory](#14-validation-strategy-theory)
+15. [Results & How to Interpret Them](#15-results--how-to-interpret-them)
+16. [Limitations](#16-limitations)
+17. [How to Run — Step by Step](#17-how-to-run--step-by-step)
+18. [Project Development Timeline](#18-project-development-timeline)
+19. [Future Work](#19-future-work)
+20. [Further Reading](#20-further-reading)
 
 ---
 
-## 2. Why this problem is difficult
+## 1. Problem Statement
 
-Conflict data is difficult because it is:
+**Grain of prediction:** one observation = one `COUNTRY × WEEK`.
 
-- sparse
-- highly irregular
-- zero-inflated
-- skewed toward a few extreme spikes
-- non-stationary across time
-- partially driven by unseen political, economic, and security events
+**Target:** `next_week_fatalities` — total conflict fatalities in that country during the week immediately following the observation week.
 
-Because of this, a naive model can be surprisingly competitive. The core question is therefore not “can we make a prediction?” but “can we build a model that meaningfully improves over persistence?”
+**Formulation in plain notation** (used throughout this README instead of LaTeX, for GitHub rendering stability):
 
-In this repo, the benchmark is the naive model:
-
-$$
-\hat{y}_{t+1} = y_t
-$$
-
-That means the simplest forecast assumes that next week’s fatalities will be the same as this week’s fatalities.
-
-This is a strong baseline because conflict tends to be persistent over short periods, especially in ongoing conflicts.
-
----
-
-## 3. Data source and data assumptions
-
-The project expects raw data in a tabular CSV format similar to ACLED event extracts.
-
-The code uses the following minimum required columns:
-
-- WEEK
-- COUNTRY
-- EVENTS
-- FATALITIES
-
-Additional columns such as ADMIN1, CENTROID_LATITUDE, and CENTROID_LONGITUDE are used in the spatial modeling workflow.
-
-### Important data assumption
-
-A raw event log usually contains only rows for weeks or places where something happened. It does not explicitly contain rows for peaceful or inactive weeks.
-
-For time-series forecasting, that creates a major issue: if the pipeline simply tries to build lags from the raw table, the model would silently assume missing weeks are unknown instead of truly zero. That would be a form of leakage or incorrect temporal handling.
-
-To solve that, the project creates a complete panel:
-
-- all weeks in the observed date range
-- all countries in the dataset
-- all missing country-week combinations are filled with 0 for EVENTS and FATALITIES
-
-This is a key design choice in the code and a core part of the project’s methodology.
-
----
-
-## 4. System architecture
-
-The repository is organized around a clear pipeline:
-
-1. Raw data ingestion
-2. Temporal panel construction
-3. Feature engineering
-4. Train/test splitting
-5. Model training
-6. Evaluation
-7. Risk classification
-8. Explainability
-9. Dashboard data generation
-10. Optional advanced analysis
-
-The code is split into modules so the workflow is testable and reusable.
-
-### Repository layout
-
-- `src/data_processing.py` — data loading, aggregation, panel construction, zero-filling
-- `src/features.py` — lag features, rolling features, target shifting
-- `src/models.py` — baseline, Ridge, Random Forest model definitions
-- `src/split.py` — chronological train/test split
-- `src/evaluations.py` — MAE/RMSE evaluation utilities
-- `src/risk_classifier.py` — high-risk classification using country-specific thresholds
-- `src/SHAP_explain.py` — TreeSHAP explainability script
-- `src/spatial_modeling.py` — ADMIN1 aggregation and spatial lag computation
-- `src/validation.py` — walk-forward validation
-- `src/out_of_time_test.py` — frozen-model out-of-time evaluation
-- `src/gradboost_comparison.py` — broader model comparison including XGBoost and LightGBM
-- `src/dashboard_data.py` — generates dashboard parquet output
-- `app/app.py` — Streamlit dashboard
-- `data/raw-data/` — raw CSV inputs
-- `data/processed/` — processed parquet outputs
-- `models/` — saved model artifacts
-- `notebooks/` — exploratory notebooks
-- `tests/` — project test files
-
----
-
-## 5. Core ML problem formulation
-
-The repository treats this as a supervised time-series regression problem.
-
-### Target variable
-
-The target is:
-
-- next week’s fatalities for each country
-
-In code, the target is named:
-
-- `next_week_fatalities`
-
-This is created by shifting the fatality series forward by one week within each country.
-
-### Forecasting task
-
-Given historical information up to week t, predict:
-
-```math
-\(\hat{y}_\){t+1}
+```
+Given information known at the end of week t for country i,
+predict y(i, t+1) = fatalities in country i during week t+1.
 ```
 
-where $y_t$ is current fatalities and $y_{t+1}$ is next week’s fatalities.
-
-### Why this is a valid supervised setup
-
-The full weekly panel gives one row per country-week. The feature row at time t contains information from the past (lags, rolling windows, and recent events). The target at that same row is the actual number of fatalities in the next week.
-
-This is a standard supervised learning framing for a one-step-ahead forecasting problem.
+This is a **one-step-ahead, panel-structured, supervised regression problem** — not a classification problem, not a generative simulation, and not an attempt to predict specific events, political outcomes, or causes of conflict.
 
 ---
 
-## 6. Data processing pipeline
+## 2. Why Conflict Forecasting Is Hard
 
-### 6.1 Loading the raw file
+Understanding *why* this is a hard problem is what justifies almost every later modeling decision, so it's worth being precise about the statistical properties involved.
 
-The function `load_raw(path)` reads the CSV and checks that the required columns exist.
+### 2.1 Zero-inflation
+Most country-weeks have **zero or near-zero** fatalities. A large point mass at zero violates the assumptions of ordinary least squares (which assumes roughly continuous, symmetric residuals) and of naive count models like plain Poisson regression (which assume mean ≈ variance).
 
-It then converts the `WEEK` column to a pandas datetime format.
+### 2.2 Heavy right skew / extreme spikes
+Observed target distribution in this project:
+```
+mean    ≈ 4.75
+median  = 0
+std     ≈ 39.5
+max     = 8102
+```
+A distribution where the **standard deviation is ~8x the mean**, and the max is ~1700x the mean, is extremely heavy-tailed. This means:
+- A model that just predicts near-zero for everything will already achieve a deceptively "good-looking" MAE, because most rows *are* near zero.
+- The few extreme rows dominate squared-error metrics disproportionately.
+- Standard cross-validation assumptions (i.i.d., similar-variance folds) don't hold cleanly.
 
-### 6.2 Aggregation to country-week
+### 2.3 Non-stationarity
+The statistical properties of conflict (mean fatalities, volatility, spatial spread) **change over time** — escalation phases, ceasefires, and political shocks shift the data-generating process itself. A model is not just interpolating a fixed function; it's forecasting a moving target. This is why simple k-fold cross-validation (which assumes exchangeable, time-independent samples) is invalid here — see Section 8.
 
-The function `aggregate_to_country_week(df)` collapses all raw events into a single row per country-week.
+### 2.4 Persistence / autocorrelation
+Despite the above, conflict has strong **short-term autocorrelation** — an active conflict zone this week is very likely to still be active next week. This single fact is what makes the naive baseline (Section 9.1) so strong, and it's the central benchmark the entire project is built around.
 
-That means multiple event records in the same country during the same week are summed into:
-
-- `EVENTS`
-- `FATALITIES`
-
-This is the first major transformation because the raw data is an event log, not a weekly panel.
-
-### 6.3 Complete panel construction
-
-The function `build_complete_panel(df)` creates a full grid:
-
-```math
-\([\text{all weeks}] \times [\text{all countries}] \%\%\)MAGIT_PARSER_PROTECT%%```
-
-This is then reindexed and all missing combinations are filled with zero.
-
-This gives a balanced panel with no gaps in the time series and no missing country-week rows.
-
-### 6.4 Why zero-fill matters
-
-Without this step, the lag logic would produce irregular time gaps, and the model would potentially treat “missing in raw data” as “unknown” rather than “zero observed activity.”
-
-The repository explicitly adopts the assumption that:
-
-- missing country-week records mean no recorded conflict activity in that period
-- not a missing-value situation
-
-This is a strong and sensible assumption for weekly ACLED-style aggregates, especially for a first-pass forecasting system.
+### 2.5 Omitted variables
+The available features are purely **endogenous** (derived from the fatalities/events series itself). Real conflict escalation is driven by political negotiations, troop movements, foreign intervention, ceasefire agreements, and economic shocks — none of which are in this dataset. This bounds the theoretical ceiling of any model trained only on lagged fatalities/events.
 
 ---
 
-## 7. Feature engineering
+## 3. Data Source & Core Assumptions
 
-The repo’s feature engineering is centered around short-term historical structure.
+Data: ACLED-style weekly aggregated Middle East conflict event extracts, with minimum required columns:
 
-### 7.1 Lag features
-
-In `src/features.py`, the function `add_lag_features(df)` adds:
-
-- `fatalities_lag1`
-- `fatalities_lag2`
-- `fatalities_lag3`
-- `events_lag1`
-
-These are generated within each country group using pandas groupby shifts.
-
-For example:
-
-```math
-\(\text{fatalities\_lag1}_\){i,t} = y_{i,t-1}
+```
+WEEK, COUNTRY, EVENTS, FATALITIES
 ```
 
-```math
-\(\text{fatalities\_lag2}_\){i,t} = y_{i,t-2}
+Extended columns used for spatial modeling: `ADMIN1`, `CENTROID_LATITUDE`, `CENTROID_LONGITUDE`.
+
+### 3.1 The critical structural fact about the raw data
+A raw ACLED-style export is an **event log**, not a panel: it can contain **multiple rows per country-week** — one per admin-region/event-type/sub-event-type combination. This means:
+
+```
+df.groupby('COUNTRY')['FATALITIES'].shift(-1)
+```
+does **not** compute "next week's fatalities." It computes "the next *row* for that country" — which, if a country has several rows in the same week, might still be the *same* week. This was an early, documented mistake in this project and is exactly why Section 5.2 (aggregation) must always happen **before** any lag/shift logic.
+
+### 3.2 The missing-week assumption
+ACLED-style exports only contain rows for weeks/places where an event was recorded. There is no explicit "zero activity" row. The project makes an explicit, documented modeling assumption:
+
+> **Absence of a country-week record means zero recorded conflict activity that week — not "unknown" or "missing data."**
+
+This is a **Missing Completely At Random vs. Missing Not At Random** distinction from a statistics standpoint: we are asserting the missingness mechanism is structural (ACLED doesn't log rows for inactivity) rather than informative (data wasn't collected). This assumption is reasonable for a conflict-monitoring dataset like ACLED but is explicitly stated here because it directly determines model behavior — treating gaps as `NaN` vs. `0` produces materially different lag/rolling features.
+
+---
+
+## 4. Repository Architecture
+
+```
+Middle-East-Conflicts/
+├── app/
+│   └── app.py                     Streamlit dashboard
+├── data/
+│   ├── raw-data/                  Raw ACLED-style CSV input
+│   └── processed/                 Generated parquet outputs
+├── models/                        Saved model artifacts (.pkl)
+├── notebooks/                     Exploratory analysis notebooks
+├── src/
+│   ├── data_processing.py         Loading, aggregation, zero-filled panel
+│   ├── features.py                Lag features, rolling features, target
+│   ├── models.py                  Baseline, Ridge, Random Forest
+│   ├── split.py                   Chronological train/test split
+│   ├── evaluations.py             MAE / RMSE evaluation utilities
+│   ├── risk_classifier.py         High-risk binary classification layer
+│   ├── SHAP_explain.py            TreeSHAP explainability
+│   ├── spatial_modeling.py        ADMIN1-level panel + spatial lag features
+│   ├── validation.py              Walk-forward (rolling-origin) validation
+│   ├── out_of_time_test.py        Frozen-model genuine future-data test
+│   ├── gradboost_comparison.py    XGBoost / LightGBM / Tweedie comparison
+│   └── dashboard_data.py          Generates dashboard-ready parquet
+└── tests/                         Unit tests
 ```
 
-```math
-\(\text{fatalities\_lag3}_\){i,t} = y_{i,t-3}
+**Design rationale for this module split:** each file maps to exactly one pipeline stage (data → features → split → model → eval → risk → explain → spatial → validate → serve). This makes every stage independently testable and independently swappable — e.g., you can replace `models.py`'s Random Forest with a different estimator without touching feature engineering or evaluation code at all. The alternative (one monolithic script) is faster to write but couples every concern together, making it hard to isolate bugs like the shift-before-aggregation mistake in Section 3.1.
+
+---
+
+## 5. Data Pipeline: Theory & Implementation
+
+### 5.1 Loading (`load_raw`)
+Reads the CSV, validates required columns exist, parses `WEEK` to `datetime64`. Failing fast on a missing column here prevents a silent `KeyError` deep inside feature engineering, where it would be much harder to trace back to its source.
+
+### 5.2 Aggregation to country-week (`aggregate_to_country_week`)
+```
+country_week = raw.groupby(['WEEK', 'COUNTRY']).agg(
+    EVENTS = sum(EVENTS),
+    FATALITIES = sum(FATALITIES)
+)
+```
+This is a **sum aggregation**, not mean or max, because both `EVENTS` and `FATALITIES` are *counts* — additive quantities across sub-regions and event types within the same country-week. This step is what converts an event log into a proper panel-data structure (one row per unit-of-analysis per time period), which is the precondition for any of the lag/rolling logic in Section 6 to be mathematically meaningful.
+
+### 5.3 Complete panel construction (`build_complete_panel`)
+Builds the full Cartesian product:
+```
+all_weeks × all_countries
+```
+then reindexes the aggregated data onto that grid, filling missing combinations with `0`.
+
+**Why this matters mathematically:** a lag feature like `fatalities_lag1` is only correctly defined if consecutive rows for a country represent *consecutive weeks*. If a country has a gap (no ACLED record for a quiet week), a naive `.shift(1)` would silently pull the value from the *previous recorded week*, which might be several weeks earlier — corrupting every downstream lag/rolling feature. The complete panel eliminates this failure mode entirely by guaranteeing every country has exactly one row per week with no gaps.
+
+---
+
+## 6. Feature Engineering: Theory & Math
+
+### 6.1 Lag features
+```
+fatalities_lag1(i,t) = FATALITIES(i, t-1)
+fatalities_lag2(i,t) = FATALITIES(i, t-2)
+fatalities_lag3(i,t) = FATALITIES(i, t-3)
+events_lag1(i,t)     = EVENTS(i, t-1)
+```
+**Statistical justification:** these are **autoregressive features** — they let a model approximate an AR(3)-style process (a linear/nonlinear function of the last 3 lags), which is the simplest way to encode short-term persistence (Section 2.4) into a supervised-learning feature matrix instead of using a dedicated time-series model like ARIMA.
+
+**Why 3 lags and not more?** Alternatives considered: 1 lag (too little memory — can't distinguish a spike from a sustained trend), 8+ lags (risks overfitting with a modest sample size per country, and dilutes the signal since conflict autocorrelation decays quickly week-to-week). **Chosen: 3 lags** — enough to represent short-term trend + momentum without excessive dimensionality.
+
+### 6.2 Rolling features
+```
+fatalities_roll_mean(i,t) = mean( FATALITIES(i, t-4..t-1) )
+fatalities_roll_std(i,t)  = std ( FATALITIES(i, t-4..t-1) )
+```
+- **Rolling mean** approximates the recent *baseline intensity* of conflict for that country — a smoothed signal that's less noisy than any single lag.
+- **Rolling standard deviation** approximates recent *volatility* — two countries can have the same average fatalities but very different risk profiles (one steady, one spiking unpredictably), and this feature lets the model distinguish them.
+
+**Why a 4-week window?** Alternatives: a 2-week window (too noisy, barely smooths anything), an 8+ week window (smooths away exactly the recent escalation signal that matters for a 1-week-ahead forecast), an exponentially-weighted moving average / EWMA (weights recent weeks more heavily — arguably better, but harder to explain and audit than a plain window mean). **Chosen: simple 4-week rolling window** — a defensible trade-off between noise reduction and responsiveness, and trivial to explain to a non-technical stakeholder.
+
+### 6.3 The leakage question, resolved precisely
+An earlier draft of this project over-corrected and assumed *any* inclusion of the current week `t` in a feature was leakage. That's not quite right. The precise rule is:
+
+```
+A feature used to predict week (t+1) may use any information
+available by the END of week t — including week t itself.
+It must never use information from week (t+1) or later.
 ```
 
-This gives the model recent memory of how violent the country has been over the last few weeks.
+Under that rule, a rolling window of `t-3..t` (including the current week) would technically be valid too. This project deliberately still uses `t-4..t-1` (excluding week `t`) anyway, because it produces a feature definition that is unambiguous, trivially auditable, and identical in spirit to "everything you knew as of last week" — a stricter but easier-to-explain standard than the theoretical maximum.
 
-### 7.2 Rolling features
+### 6.4 Final feature set
+```
+[fatalities_lag1, fatalities_lag2, fatalities_lag3,
+ events_lag1, fatalities_roll_mean, fatalities_roll_std]
+```
+A compact, fully endogenous, fully explainable 6-feature space — intentionally small so that every model comparison in Section 9 is testing *modeling capacity*, not feature-engineering luck.
 
-The function `add_rolling_features(df)` adds:
+---
 
-- `fatalities_roll_mean`
-- `fatalities_roll_std`
+## 7. Target Variable & Supervised Learning Formulation
 
-These are built from the lagged fatality signal using a 4-week window over the previous periods.
+```
+next_week_fatalities(i, t) = FATALITIES(i, t+1)
+```
+Implemented as a **grouped forward shift**: `groupby('COUNTRY')['FATALITIES'].shift(-1)`. The final week for each country has no future week to shift in, producing `NaN` — those rows are dropped before training, since there is no ground truth to learn from or evaluate against.
 
-For a country i:
+**Why this is a valid supervised-learning setup:** each row's feature vector contains only information dated ≤ week `t`; its label is the true outcome at week `t+1`. This satisfies the core requirement of any legitimate one-step-ahead forecasting model: **no feature may be a function of the label or of anything chronologically after it.**
 
-```math
-\(\mu_{i,t} = \frac{1}{4} \sum_\){k=1}^{4} y_{i,t-k}
+---
+
+## 8. Train/Test Splitting & Data Leakage
+
+### 8.1 Why random/shuffled splitting is invalid here
+Standard `train_test_split(shuffle=True)` assumes rows are **i.i.d.** (independent and identically distributed). Time-ordered, autocorrelated data violates this directly: a shuffled split would let the model train on week 500 and be tested on week 499 — i.e., train on the *future* and test on the *past*, producing an artificially optimistic, meaningless evaluation.
+
+### 8.2 Why row-order-based splitting (`shuffle=False` after sorting by country) is *also* invalid
+If data is sorted `Bahrain → Egypt → Iraq → ... → Yemen` and then split by the last 20% of *rows*, the test set ends up disproportionately representing **alphabetically later countries**, not later **time periods**. This was an actual mistake made during development — worth stating explicitly because it's a subtle, easy-to-repeat error.
+
+### 8.3 The correct approach: split by date, not by row
+```
+unique_weeks = sorted(all distinct WEEK values)
+cutoff = unique_weeks[floor(0.8 * len(unique_weeks))]
+
+train = rows where WEEK <  cutoff
+test  = rows where WEEK >= cutoff
+```
+Every country now has historical data in train and later data in test — the model is evaluated on its ability to generalize **forward in time**, which is the only evaluation that means anything for a forecasting task.
+
+### 8.4 Beyond a single cutoff: walk-forward validation
+A single train/test cutoff answers "how good is the model at this one point in history?" It does **not** tell you whether performance is stable across different time regimes (calm periods vs. escalation periods). See Section 14.2 for the walk-forward methodology that addresses this.
+
+---
+
+## 9. Models: Full Theory
+
+All models are compared on the identical feature set and identical split, so any performance difference reflects **modeling capacity**, not feature engineering differences.
+
+### 9.1 Naive baseline (persistence forecast)
+```
+y_hat(t+1) = y(t)
+```
+**Theoretical grounding:** this is the optimal 1-step-ahead forecast under a **random walk model** — i.e., if fatalities followed `y(t+1) = y(t) + noise`, this baseline would already be unbeatable in expectation (a classic result from time-series theory: for a true random walk, no feature-based model can systematically outperform the last observed value). The entire point of comparing every other model against this baseline is to test whether conflict fatalities deviate meaningfully from a pure random walk — i.e., whether there's exploitable structure beyond "next week looks like this week."
+
+**Why this baseline and not another:** alternatives considered — seasonal-naive (same week last year: needs 52+ weeks of history per country and assumes annual seasonality that conflict doesn't reliably exhibit), historical country mean (ignores recent trend entirely, weaker for short-horizon forecasts). **Chosen: last-observed-value persistence** — the hardest, most standard baseline for 1-week-ahead time series.
+
+### 9.2 Ridge Regression
+**Model:**
+```
+y_hat = X * beta
+```
+**Objective function (what `.fit()` minimizes):**
+```
+minimize over beta:   ||X*beta - y||^2  +  alpha * ||beta||^2
+```
+where `||X*beta - y||^2` is the sum of squared residuals (ordinary least-squares loss) and `alpha * ||beta||^2` is an **L2 penalty** on the coefficient vector's magnitude.
+
+**Closed-form solution:**
+```
+beta_ridge = (X^T X + alpha*I)^-1  X^T y
+```
+Compare to plain OLS: `beta_ols = (X^T X)^-1 X^T y`. The `+ alpha*I` term is what makes Ridge numerically stable even when `X^T X` is close to singular.
+
+**Why this matters here specifically:** `fatalities_lag1`, `fatalities_lag2`, `fatalities_lag3`, and `fatalities_roll_mean` are, by construction, **strongly correlated with each other** (they're all derived from the same underlying series at nearby time offsets). This is **multicollinearity**, and under plain OLS it causes `(X^T X)^-1` to become numerically unstable — small changes in the data produce wildly different coefficient estimates (high variance). The L2 penalty shrinks correlated coefficients toward each other and toward zero, trading a small amount of bias for a large reduction in variance — a direct application of the **bias-variance tradeoff**.
+
+**Why Ridge over alternatives:** plain OLS (unstable here, as above), Lasso/L1 (would zero out some of the lag features entirely — undesirable when we specifically want to see each lag's relative contribution, not a sparse subset), Elastic Net (a reasonable middle ground, adds a second hyperparameter to tune for limited benefit at this feature-space size). **Chosen: Ridge** — handles the known multicollinearity cheaply, keeps all features' contributions visible, one hyperparameter (`alpha`).
+
+### 9.3 Random Forest Regressor
+**Base unit — a single regression tree:** at each node, the tree searches over features and split points to find the split that most reduces variance in the target within each resulting child node:
+```
+Split quality (variance reduction) at node m:
+  reduction = Var(y_m) - [ (n_left/n_m)*Var(y_left) + (n_right/n_m)*Var(y_right) ]
+```
+The tree greedily picks the split maximizing this reduction, recursively, until a stopping condition (max depth, min samples per leaf, etc.).
+
+**Ensembling — bagging (Bootstrap Aggregating):**
+1. Draw `B` bootstrap samples (sampling with replacement) from the training data.
+2. Fit one regression tree on each bootstrap sample, using a random subset of features at each split (this second randomization step is what distinguishes Random Forest from plain bagged trees).
+3. Final prediction = **average** of all `B` trees' predictions:
+```
+y_hat = (1/B) * sum over b of Tree_b(x)
+```
+**Why averaging reduces variance:** if each tree has prediction variance `sigma^2` and trees were fully independent, the ensemble variance would be `sigma^2 / B`. In practice trees are correlated (from shared training data), so the reduction is smaller but still substantial — this is the core statistical mechanism that makes Random Forest more stable than any single deep tree.
+
+**Why Random Forest here specifically:** the relationship between recent fatality lags and next-week fatalities is very unlikely to be linear — escalation can behave like a threshold effect (nothing happens until some tipping point, then it spikes) rather than a smooth linear function. Trees naturally model **thresholds and interactions** (e.g., "high `fatalities_lag1` AND high `fatalities_roll_std`" behaving differently than either alone) without requiring the modeler to manually specify interaction terms, and without requiring feature scaling (tree splits are invariant to monotonic transformations of a feature).
+
+**Why Random Forest over alternatives:** plain single decision tree (high variance, overfits badly), Support Vector Regression (requires careful feature scaling and kernel choice, slower at this data volume, less interpretable via feature importances), Gradient Boosting/XGBoost (likely stronger — deliberately introduced as the *next* rung, Section 9.4, rather than the first nonlinear model, so the comparison ladder is legible: linear → bagged-nonlinear → boosted-nonlinear).
+
+### 9.4 Gradient Boosting (XGBoost / LightGBM)
+**Core idea — additive modeling via functional gradient descent:** unlike bagging (parallel, variance-reduction), boosting is **sequential, bias-reduction**: each new tree is fit to the *residual errors* of the current ensemble.
+
+```
+F_0(x) = initial constant prediction (e.g., mean of y)
+For m = 1 to M:
+    residual_i = y_i - F_(m-1)(x_i)          [the "gradient" of squared-error loss]
+    fit tree h_m(x) to predict residual_i
+    F_m(x) = F_(m-1)(x) + learning_rate * h_m(x)
+Final prediction: F_M(x)
+```
+This is literally gradient descent, but performed in **function space** rather than parameter space — each tree is a step in the direction that most reduces the loss.
+
+**Why this can outperform Random Forest:** bagging reduces variance but does nothing about bias (an ensemble of unbiased-but-noisy trees is still centered near the truth on average). Boosting explicitly targets whatever the current ensemble is still getting wrong, which often yields lower bias and, empirically, better accuracy on structured/tabular data — this is well documented in ML benchmarks (gradient-boosted trees are consistently among the strongest performers on tabular regression tasks).
+
+**Why introduced only as a later/optional model here:** it adds a new dependency, more hyperparameters to tune (`learning_rate`, `max_depth`, `n_estimators`, regularization terms), and a higher overfitting risk if used carelessly. The project's guiding principle — don't add complexity until the simpler model's ceiling is understood — places it deliberately after Ridge and Random Forest, not before.
+
+### 9.5 Tweedie objective (LightGBM)
+**The problem it targets:** the target distribution (Section 2.2) has a large point mass at zero plus a continuous, heavy-tailed spread of positive values. Squared-error loss (used by Ridge, RF, and plain gradient boosting) implicitly assumes roughly homogeneous, symmetric-around-the-mean residual behavior — a poor match for zero-inflated count-like data.
+
+**What the Tweedie distribution is:** a member of the exponential dispersion family parameterized by a power parameter `p`, where its **variance function** follows:
+```
+Var(Y) = phi * mean(Y)^p
+```
+- `p = 0` → Normal distribution (constant variance)
+- `p = 1` → Poisson distribution (variance = mean, pure count data)
+- `p = 2` → Gamma distribution (continuous, right-skewed, no mass at zero)
+- `1 < p < 2` → **Compound Poisson-Gamma**: a genuine mixture that produces an exact point mass at zero *plus* a continuous positive distribution — mechanically, this arises from "a Poisson-distributed number of Gamma-distributed events summed together," which is a very natural generative story for conflict fatalities (a Poisson-ish number of violent incidents in a week, each contributing a Gamma-distributed fatality count).
+
+**Why this is a principled choice, not just a fancier-sounding one:** unlike log-transforming the target and using ordinary squared error (Section 9.6), the Tweedie loss respects the mean-variance relationship of the data directly during training, rather than trying to approximately linearize it through a transform. In practice, this project treats it as a testable hypothesis (per the "let the evaluation decide" principle), compared directly against squared-error models on the same walk-forward folds — not adopted a priori.
+
+### 9.6 Log-target transformation
+```
+train on:      log_target = log(1 + y)
+predict, then invert:   y_hat = exp(log_target_hat) - 1
+```
+**Why `log(1+y)` and not `log(y)`:** the target contains zeros, and `log(0)` is undefined (`-infinity`). Adding 1 before the log (the `log1p` transform) keeps zero mapped to zero while still compressing the heavy right tail.
+
+**Effect:** squared-error loss on the log scale penalizes *relative* errors rather than *absolute* ones — a miss of 5 fatalities on a base of 2 (150% relative error) is penalized far more than a miss of 5 fatalities on a base of 500 (1% relative error). This is usually a better match for how forecast quality "should" be judged on a heavy-tailed target, since it prevents the handful of extreme-fatality weeks from single-handedly dominating the training loss the way they would under raw squared error.
+
+**Trade-off to be aware of:** back-transforming via `exp(x) - 1` on a squared-error-optimized log-scale prediction is a **biased** estimator of the mean of the original-scale target (a known result — Jensen's inequality: `E[exp(X)] >= exp(E[X])` for any random variable `X`). In practice this project doesn't apply a bias-correction factor (e.g., a smearing estimator), which is worth stating explicitly as a known limitation of this specific technique rather than treating the inverted predictions as unbiased.
+
+---
+
+## 10. Evaluation Metrics: Full Theory
+
+### 10.1 Mean Absolute Error (MAE) — primary metric
+```
+MAE = (1/n) * sum( |y_i - y_hat_i| )
+```
+- Same units as the target (fatalities) → directly interpretable ("on average, off by X fatalities").
+- The **population median** is the value that minimizes expected MAE — meaning MAE-optimal models are naturally robust to the extreme spikes in this dataset, since they aren't pulled as hard toward outliers as squared-error-optimal models are.
+- **Chosen as the primary metric** specifically because of the target's heavy skew (Section 2.2): a metric that doesn't get dominated by a handful of extreme rows gives a more representative picture of "typical" forecast quality.
+
+### 10.2 Root Mean Squared Error (RMSE) — secondary metric
+```
+RMSE = sqrt( (1/n) * sum( (y_i - y_hat_i)^2 ) )
+```
+- The **population mean** is the value that minimizes expected squared error — RMSE-optimal predictions are pulled toward the mean, which is heavily influenced by outliers in a skewed distribution.
+- RMSE >= MAE always (a consequence of Jensen's inequality applied to the convexity of the square function), and the *gap* between RMSE and MAE is itself informative: a large RMSE-to-MAE ratio signals that a small number of large errors are driving overall error, which is expected and worth explicitly reporting given this project's extreme-spike target distribution.
+- **Chosen as a secondary, not primary, metric** — it's the right tool for answering "how bad are our worst misses," which MAE alone can't tell you, but using it as the sole metric would make the score overly sensitive to the rare extreme rows.
+
+### 10.3 Why MAPE is deliberately NOT used
+```
+MAPE = (1/n) * sum( |y_i - y_hat_i| / |y_i| ) * 100
+```
+Mathematically undefined (division by zero) whenever `y_i = 0` — which describes the **majority** of rows in this dataset (median = 0). This isn't a minor edge case here; it makes MAPE structurally unusable for this specific target distribution, which is why it's absent from the evaluation code despite being a common regression metric elsewhere.
+
+### 10.4 Metric summary table
+
+| Metric | Optimal point estimate | Sensitive to outliers? | Role here |
+|---|---|---|---|
+| MAE | Median | Low | Primary — typical error |
+| RMSE | Mean | High | Secondary — worst-case sensitivity |
+| MAPE | — | Undefined at y=0 | Not used |
+
+---
+
+## 11. Risk Classification Layer
+
+### 11.1 Label definition
+```
+high_risk_next_week(i,t) = 1  if  next_week_fatalities(i,t) > threshold(i,t)
+                          = 0  otherwise
+
+threshold(i,t) = expanding 90th percentile of country i's own
+                 historical FATALITIES, computed using only data
+                 up to week t (shifted back 1 step to avoid leakage)
+```
+**Why a country-specific, expanding threshold and not a fixed global number:** a fixed global fatality threshold (e.g., "high-risk if > 50") would be unfair across heterogeneous countries — a number that's an extreme outlier for a historically calm country might be an ordinary week for a country in active, sustained conflict. An **expanding quantile** (recomputed using only data available up to that point in time) self-calibrates per country and grows more precise as more history accumulates, without injecting an arbitrary global constant. This also explicitly avoids an earlier proposed rule (`prediction > 1.5 × recent average`), which the project rejected as an unjustified, arbitrary multiplier with no statistical grounding.
+
+### 11.2 Classifier and class imbalance
+```
+RandomForestClassifier(class_weight='balanced')
+```
+By construction, only ~10% of rows are labeled high-risk (the 90th-percentile definition guarantees this). This is a classic **imbalanced classification** setting, where a naive classifier can achieve high accuracy just by always predicting the majority class.
+
+`class_weight='balanced'` reweights the loss function inversely proportional to class frequency:
+```
+weight(class c) = n_samples / (n_classes * n_samples_in_class_c)
+```
+This makes misclassifying the rare high-risk class more costly during training, without needing to physically resample the data (compare to SMOTE, which synthesizes new minority-class examples — a heavier-handed and less interpretable fix than reweighting for this scale of imbalance).
+
+### 11.3 Why ROC-AUC and not accuracy
+Accuracy is misleading here — a classifier that *always* predicts "not high-risk" would already score ~90% accuracy while being useless. Instead:
+```
+ROC-AUC = P( score(random positive example) > score(random negative example) )
+```
+This measures the model's ability to **rank** high-risk weeks above normal weeks across every possible decision threshold, independent of class balance — the appropriate metric for an early-warning/alerting system where the actual operating threshold (how conservative vs. aggressive the alert should be) is a separate downstream decision from model quality itself. Precision/recall at a chosen threshold is reported alongside it, since for an alert system, missed escalations (false negatives) are typically more costly than false alarms (false positives) — a trade-off ROC-AUC alone doesn't communicate, which is why the project also uses a full classification report.
+
+---
+
+## 12. Explainability: SHAP Theory
+
+### 12.1 Foundation: Shapley values (cooperative game theory)
+SHAP (SHapley Additive exPlanations) is built on the **Shapley value**, originally from cooperative game theory: given a "game" with `n` players who jointly produce some payoff, the Shapley value fairly distributes that payoff among players based on their **average marginal contribution** across every possible coalition (ordering) of players.
+
+Applied to ML: "players" = features, "payoff" = the difference between the model's prediction for a specific row and the model's average prediction over the dataset. The Shapley value for feature `j` on instance `x` is:
+```
+phi_j = sum over all subsets S not containing j of:
+    [ |S|! * (n - |S| - 1)! / n! ] * [ f(S ∪ {j}) - f(S) ]
+```
+i.e., the feature's contribution, averaged over every possible order in which features could be "added" to the prediction.
+
+### 12.2 The additivity property
+```
+f(x) = base_value + sum over all features j of phi_j
+```
+This is what makes SHAP genuinely useful for this project: every individual prediction can be exactly decomposed into "the average prediction" plus "how much each of `fatalities_lag1`, `fatalities_roll_std`, etc. pushed this specific prediction up or down" — with the contributions guaranteed to sum exactly to the model's actual output (unlike some other feature-attribution heuristics, which don't guarantee this).
+
+### 12.3 TreeSHAP
+Computing exact Shapley values naively is exponential in the number of features (`2^n` coalitions). **TreeSHAP** is a polynomial-time algorithm specific to tree-based models (Random Forest, XGBoost, LightGBM) that computes *exact* Shapley values by exploiting the tree structure directly, rather than the approximate sampling-based methods needed for arbitrary black-box models (e.g., KernelSHAP). This is why this project's `SHAP_explain.py` uses `shap.TreeExplainer` specifically — it's exact and fast for exactly the model types used here.
+
+**Why SHAP over simpler alternatives:** built-in `feature_importances_` (Random Forest's mean-decrease-in-impurity importance) only gives a single **global** ranking and is known to be biased toward high-cardinality/continuous features; permutation importance is global-only too. SHAP additionally gives **per-prediction, per-feature** explanations — necessary for answering "why did the model flag Syria as high-risk *this specific week*," not just "which features matter on average."
+
+---
+
+## 13. Spatial Modeling: Theory
+
+### 13.1 Motivation — Tobler's First Law of Geography
+> "Everything is related to everything else, but near things are more related than distant things."
+
+Conflict frequently spills across administrative borders — violence in a neighboring province is a meaningful predictor of near-term local risk that a purely country-level, purely temporal model cannot see. The ADMIN1-level extension exists to capture this.
+
+### 13.2 ADMIN1 panel construction
+Identical logic to Section 5, but grouped by `[WEEK, COUNTRY, ADMIN1]` instead of `[WEEK, COUNTRY]` — a finer spatial grain, same temporal methodology.
+
+### 13.3 Spatial lag feature via nearest neighbors
+```
+spatial_lag(region i, week t) = mean( FATALITIES(j, t-1)
+                                       for j in the k nearest
+                                       neighboring regions to i )
+```
+Implemented with a **BallTree** — a space-partitioning data structure that supports efficient k-nearest-neighbor queries (`O(log n)` average query time vs. `O(n)` for brute-force distance comparison against every other region) — using the **haversine metric**, since region centroids are given as latitude/longitude on a sphere, not points on a flat Euclidean plane.
+
+### 13.4 Haversine distance — the correct metric for lat/lon data
+```
+a = sin^2((lat2-lat1)/2) + cos(lat1)*cos(lat2)*sin^2((lon2-lon1)/2)
+d = 2 * R * arcsin( sqrt(a) )
+```
+where `R` is Earth's radius, and `lat`/`lon` are in radians.
+
+**Why haversine and not plain Euclidean distance on raw lat/lon values:** latitude and longitude are angular coordinates on a sphere, not a flat grid — one degree of longitude represents a very different physical distance near the equator versus near the poles. Euclidean distance on raw coordinates would badly distort real-world proximity, especially at the range of latitudes the Middle East spans; haversine distance correctly accounts for the Earth's curvature and returns true great-circle distance.
+
+**Why BallTree and not brute-force distance computation:** at a few thousand region-week rows, brute-force is tractable, but BallTree scales far better if the panel grows (more countries, more admin regions, or higher-frequency data) — and it's the standard `scikit-learn` structure that natively supports the haversine metric for exactly this kind of geospatial nearest-neighbor query.
+
+### 13.5 An explicit caution about combining spatial and temporal validation
+Testing "does the model generalize to a future *time period*" (Section 14) and testing "does the model generalize to a *held-out region it's never seen*" (a spatial leave-one-region-out split) are different questions with different validation designs. This project does not conflate them — each should be reported as a separate, clearly-labeled result if both are run.
+
+---
+
+## 14. Validation Strategy: Theory
+
+### 14.1 Chronological holdout (baseline validation)
+The single train/before-cutoff, test/after-cutoff split from Section 8.3. Answers: "how good is the model at one specific point in history?" Cheap, but a single split can be an unrepresentative sample of one particular regime (e.g., an unusually calm or unusually volatile period).
+
+### 14.2 Walk-forward (rolling-origin) validation
+```
+for each fold:
+    train on all weeks before cutoff_k
+    test  on the next block of weeks after cutoff_k
+    advance cutoff_k forward
+    repeat
+```
+This produces **multiple** MAE/RMSE estimates across different historical windows rather than one. Reporting both the **average** performance and the **spread/variance across folds** answers a materially different and more useful question than a single holdout: not just "is this model good," but "is this model *consistently* good, or does it fall apart during specific regimes (e.g., escalation periods)?" This is the standard, textbook-correct way to validate a time-series model, analogous to k-fold cross-validation's role for i.i.d. data — but respecting temporal order, unlike standard k-fold.
+
+### 14.3 Out-of-time testing (the strongest test in the project)
+```
+1. Freeze a model trained ONLY on data through a fixed historical cutoff.
+2. Do not touch or retune it.
+3. Obtain genuinely later data (collected after the model was frozen).
+4. Run the frozen model's predictions on that later data.
+5. Compare its error there against its error on the original test set.
+```
+**Why this is qualitatively stronger than walk-forward validation:** walk-forward validation still evaluates the model *within the same historical dataset* it was developed against — there's always a risk that decisions made while building the pipeline (feature choices, hyperparameters, even which validation scheme to trust) were implicitly, even unconsciously, shaped by repeatedly looking at that same historical data. An out-of-time test on data that plainly did not exist yet when the model was frozen is the closest thing to a genuine, unbiased test of real-world forecasting ability — it directly answers "would this model actually have worked, going forward, in practice?" A materially worse out-of-time MAE than the historical test MAE is itself a valid and important finding (evidence of non-stationarity — Section 2.3), not a failure to hide.
+
+---
+
+## 15. Results & How to Interpret Them
+
+Actual numbers depend on your specific data extract and split, but the pipeline is designed to always produce a leaderboard like:
+
+```
+Model                          MAE     RMSE
+Naive baseline (persistence)   ?.??    ?.??
+Ridge Regression                ?.??    ?.??
+Random Forest                   ?.??    ?.??
+XGBoost / LightGBM              ?.??    ?.??
+LightGBM (Tweedie objective)    ?.??    ?.??
 ```
 
-```math
-\(\sigma_{i,t} = \sqrt\){\(\frac{1}{4-1} \sum_\){k=1}^{4} (y_{i,t-k} \(- \mu_\){i,t})^2}
-```
-
-The rolling mean captures recent average intensity, while the rolling standard deviation captures volatility.
-
-### 7.3 Target creation
-
-The function `add_target(df)` creates:
-
-- `next_week_fatalities`
-
-by shifting fatalities one step forward within each country:
-
-```math
-\(\text{next\_week\_fatalities}_\){i,t} = y_{i,t+1}
-```
-
-After that, rows with missing target values are dropped, because the target is not available for the final week of the panel.
-
-
-### 7.4 Feature set used by the main models
-
-The main models in `src/models.py` use these features:
-
-- `fatalities_lag1`
-- `fatalities_lag2`
-- `fatalities_lag3`
-- `events_lag1`
-- `fatalities_roll_mean`
-- `fatalities_roll_std`
-
-This is a compact, interpretable feature space that focuses on short-term conflict momentum and recent volatility.
+**How to read this table honestly:**
+- If Naive has the *lowest* MAE, that is a legitimate, reportable finding: **the available features and models don't yet add predictive value beyond simple persistence.** This is common and expected in conflict forecasting and should never be hidden or reframed.
+- If a model beats Naive, report the **percentage improvement**, not just the raw numbers — e.g., "Random Forest reduced MAE by X% versus the naive baseline."
+- Always report the **out-of-time result** (Section 14.3) alongside the historical-holdout result — a model that wins historically but degrades badly out-of-time tells a more complete and more honest story than either number alone.
 
 ---
 
-## 8. Train/test splitting
+## 16. Limitations
 
-The project uses a chronological split rather than random shuffling.
-
-The function `chronological_split(df, train_frac=0.8)`:
-
-- sorts unique weeks
-- picks a cutoff date
-- trains on weeks before the cutoff
-- tests on weeks from the cutoff onward
-
-This prevents future data leakage, which would otherwise make the evaluation artificially optimistic.
-
-The importance of this step cannot be overstated: in time-series forecasting, shuffling rows would create data leakage.
+- **Extreme spikes are structurally hard to forecast** — tree-based models in particular struggle to extrapolate beyond the magnitude of spikes seen in training data; a genuinely unprecedented escalation will likely be under-predicted by any model here.
+- **Non-stationarity** — conflict dynamics shift due to political events, ceasefires, and external intervention; a model fit to one period is not guaranteed to generalize to a materially different regime.
+- **No exogenous predictors** — the feature set is purely endogenous (derived only from past fatalities/events); no political, economic, diplomatic, or military-movement signals are incorporated, which bounds the ceiling of achievable accuracy regardless of model sophistication.
+- **Country-level aggregation hides local structure** — the core pipeline treats a whole country as one unit, which can mask sharply different sub-national dynamics (addressed only partially by the ADMIN1 extension, which introduces its own added complexity and data-sparsity challenges at finer grain).
+- **Log-target back-transformation bias** — as noted in Section 9.6, `exp(pred) - 1` is a biased estimator of the mean on the original scale; no smearing/bias correction is currently applied.
 
 ---
 
-## 9. Models in this repository
+## 17. How to Run — Step by Step
 
-## 9.1 Naive baseline
-
-`naive_forecast(df)` returns the current week’s fatalities as the predicted next-week fatalities.
-
-This implements:
-
-$$
-\hat{y}_{t+1} = y_t
-$$
-
-This is the benchmark. If the more complex models cannot beat it, the forecasting problem is not yet meaningfully solved.
-
-## 9.2 Ridge regression
-
-`train_ridge(train_df)` fits a `Ridge(alpha=1.0)` model.
-
-Ridge solves:
-
-$$
-\min_{\beta} \left\| X\beta - y \right\|^2 + \alpha \left\| \beta \right\|^2
-$$
-
-where:
-
-- $X$ is the feature matrix
-- $y$ is the target
-- $\beta$ are the regression coefficients
-- $\alpha$ controls regularization strength
-
-Ridge is useful because the lagged features are strongly correlated. Regularization stabilizes the model and makes the relationship less sensitive to multicollinearity.
-
-## 9.3 Random Forest regressor
-
-`train_random_forest(train_df)` fits a `RandomForestRegressor` with:
-
-- `n_estimators=300`
-- `random_state=42`
-- `n_jobs=-1`
-
-Random Forests are ensemble methods made of many decision trees. Each tree learns a partition of the feature space, and the final prediction is the average across trees.
-
-This makes them effective for:
-
-- nonlinear relationships
-- interactions between lag features and volatility measures
-- mixed patterns that are not well captured by a linear model
-
-For conflict forecasting, this is especially attractive because escalation behavior is rarely perfectly linear.
-
-## 9.4 Risk classifier
-
-`src/risk_classifier.py` adds a binary label called `high_risk_next_week`.
-
-The label is defined as:
-
-- next week’s fatalities exceed that country’s own expanding 90th percentile threshold from prior history
-
-This is computed with an expanding quantile, shifted one step back to prevent leakage.
-
-The classifier then trains a `RandomForestClassifier` with `class_weight="balanced"` to handle class imbalance.
-
-This is a practical way to turn the forecasting system into an operational alert tool.
-
----
-
-## 10. Evaluation metrics
-
-The core evaluation utilities are defined in `src/evaluations.py`.
-
-### 10.1 Mean Absolute Error (MAE)
-
-$$
-MAE = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|
-$$
-
-MAE is the primary evaluation metric in this repository because it is easy to interpret and measures average absolute forecasting error in the same units as fatalities.
-
-### 10.2 Root Mean Squared Error (RMSE)
-
-$$
-RMSE = \sqrt{\frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2}
-$$
-
-RMSE penalizes large errors more strongly. This is useful because conflict forecasting errors can be very uneven, and the project wants a metric that reflects both typical and severe misses.
-
-### 10.3 Why MAE and RMSE together
-
-- MAE tells you typical forecast error.
-- RMSE tells you how much the model struggles on large misses.
-
-That combination gives a more complete view of performance than either metric alone.
-
----
-
-## 11. Explainability and interpretation
-
-### 11.1 SHAP
-
-`src/SHAP_explain.py` computes exact TreeSHAP values for the trained Random Forest.
-
-SHAP values answer the question:
-
-- how much did each feature contribute to this specific prediction?
-
-In tree models, SHAP provides a principled way to distribute a prediction among its input features.
-
-This is useful for:
-
-- global importance analysis
-- local prediction debugging
-- understanding which lag or volatility features drive the model
-
-### 11.2 Why SHAP matters here
-
-In a conflict forecasting system, a prediction without explanation is risky. SHAP helps show whether the model is relying on broad recent momentum, volatility, or event counts.
-
-This matters when explaining results to stakeholders or when comparing different model behaviors.
-
----
-
-## 12. Spatial modeling
-
-The research project also includes a sub-national extension in `src/spatial_modeling.py`.
-
-This version aggregates at the `ADMIN1` level and adds spatial spillover features.
-
-### 12.1 ADMIN1 aggregation
-
-The function `aggregate_to_admin1_week(df)` groups data by:
-
-- WEEK
-- COUNTRY
-- ADMIN1
-
-This produces a finer-grained panel than the country-only version.
-
-### 12.2 Panel construction for admin regions
-
-`build_admin1_panel(df)` builds a complete panel across weeks and provinces, then fills missing values with zeros where needed.
-
-### 12.3 Spatial lag feature
-
-The function `add_spatial_lag(df, n_neighbors=5)` computes the average fatalities of neighboring admin regions at the previous week.
-
-This is motivated by the idea that conflict does not always stay within one administrative area. Violence in nearby provinces may spill over and affect adjacent regions.
-
-The repo uses a BallTree with the haversine distance metric to find nearby administrative centroids.
-
-The haversine distance is:
-
-$$
- d = 2R\arcsin\left(\sqrt{\sin^2\left(\frac{\phi_2-\phi_1}{2}\right) + \cos(\phi_1)\cos(\phi_2)\sin^2\left(\frac{\lambda_2-\lambda_1}{2}\right)}\right)
-$$
-
-Where:
-
-- $R$ is the Earth radius
-- $\phi$ is latitude
-- $\lambda$ is longitude
-
-This lets the system measure distance between nearby provinces and compute a spatial neighbor signal.
-
----
-
-## 13. Validation strategy
-
-This repository includes multiple validation designs.
-
-### 13.1 Chronological split
-
-Used for a basic train/test evaluation.
-
-### 13.2 Walk-forward validation
-
-`src/validation.py` implements rolling-origin validation.
-
-This repeatedly trains on an expanding history and evaluates on the next few weeks. It is more honest than a single holdout because it checks whether the model is stable across different time periods.
-
-### 13.3 Out-of-time testing
-
-`src/out_of_time_test.py` freezes a historical model trained on data through March 7, 2026, then evaluates it on later data from March 8 through August 29, 2026.
-
-This is one of the strongest tests in the repository because it measures whether the model can handle genuinely future, unseen periods.
-
----
-
-## 14. Advanced experiments included in the codebase
-
-Several advanced scripts exist as experiments or extensions beyond the base pipeline.
-
-### 14.1 Gradient boosting comparison
-
-`src/gradboost_comparison.py` compares:
-
-- naive baseline
-- Ridge
-- Random Forest
-- Random Forest with log-transformed target (`log1p`)
-- XGBoost
-- LightGBM
-- LightGBM with Tweedie objective
-
-This script demonstrates that the repo is not limited to a single model family.
-
-### 14.2 Tweedie objective
-
-The LightGBM Tweedie setup is especially relevant for data with many zeros and a long tail of positive counts.
-
-The Tweedie distribution is useful because it combines aspects of:
-
-- Poisson-like count behavior
-- Gamma-like continuous behavior
-
-This makes it a natural choice for zero-inflated, highly skewed count data.
-
-### 14.3 Log-target transformation
-
-The log-target experiment uses:
-
-$$
-\log(1 + y)
-$$
-
-This helps reduce the impact of extreme fatalities on tree-based regressors.
-
-Predictions are then inverted using:
-
-$$
-\exp(\tilde{y}) - 1
-$$
-
-This is a standard technique for highly skewed target variables.
-
----
-
-## 15. Dashboard and outputs
-
-### 15.1 Dashboard data generation
-
-`src/dashboard_data.py` generates a dataset for the app.
-
-It:
-
-- loads cleaned and engineered data
-- retrieves a trained model or retrains a Random Forest as needed
-- creates `predicted_fatalities`
-- writes the result to:
-
-`data/processed/latest_forecast.parquet`
-
-### 15.2 Streamlit app
-
-`app/app.py` is a multi-tab dashboard that loads the parquet file and displays:
-
-- overview metrics
-- time-series plots
-- country-level forecast comparisons
-- mapped latest predictions
-- forecast tables
-
-The dashboard enables interactive viewing of the model outputs without needing to rerun the analysis manually.
-
----
-
-## 16. How to run the project
-
-## 16.1 Environment setup
-
-Create a virtual environment and install dependencies:
-
+### 17.1 Environment setup
 ```bash
+git clone https://github.com/namegitser/Middle-East-Conflicts.git
+cd Middle-East-Conflicts
+
 python -m venv ml_env
 
 # Windows
 ml_env\Scripts\activate
-
 # macOS / Linux
 source ml_env/bin/activate
 
 pip install -r requirements.txt
 ```
+Core `requirements.txt`: `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `seaborn`, `openpyxl`, `jupyter`, `pytest`.
+Install separately for the advanced scripts: `pip install streamlit shap lightgbm xgboost plotly`.
 
-The current `requirements.txt` includes the core scientific stack:
-
-- pandas
-- numpy
-- scikit-learn
-- matplotlib
-- seaborn
-- openpyxl
-- jupyter
-- pytest
-
-Additional packages such as `streamlit`, `shap`, `lightgbm`, and `xgboost` are used by optional scripts and should be installed separately when needed.
-
-## 16.2 Generate base forecast data
-
-From the project root, run:
-
-```bash
-python src/dashboard_data.py
+### 17.2 Place your data
 ```
-
-This produces the parquet file needed by the dashboard.
-
-## 16.3 Start the dashboard
-
-```bash
-streamlit run app/app.py
+data/raw-data/<your-ACLED-style-extract>.csv
 ```
+Must contain at minimum: `WEEK, COUNTRY, EVENTS, FATALITIES`. For spatial modeling, also `ADMIN1, CENTROID_LATITUDE, CENTROID_LONGITUDE`.
 
-Then open the local Streamlit URL shown in the terminal.
-
-## 16.4 Run the evaluation pipeline
-
+### 17.3 Core version — baseline, Ridge, Random Forest, evaluation
 ```bash
 python src/evaluations.py
 ```
+Runs the full pipeline: load → aggregate → complete panel → features → target → chronological split → naive/Ridge/Random Forest → prints the MAE/RMSE leaderboard (Section 15).
 
-This loads the data, builds features, splits into train/test, trains the baseline models, and prints a leaderboard of MAE/RMSE results.
-
-## 16.5 Run the risk classifier
-
+### 17.4 Core version — risk classification
 ```bash
 python src/risk_classifier.py
 ```
+Builds the `high_risk_next_week` label (Section 11.1) and reports ROC-AUC and a full classification report.
 
-This builds the high-risk label and evaluates the classifier using ROC-AUC and classification-report metrics.
-
-## 16.6 Run SHAP analysis
-
+### 17.5 Advanced version — gradient boosting comparison
 ```bash
-python src/SHAP_explain.py
+python src/gradboost_comparison.py
 ```
+Extends the leaderboard with Random Forest (log-target), XGBoost, LightGBM, and LightGBM-Tweedie (Section 9.4–9.6), all evaluated on the same split for a fair comparison.
 
-This trains a Random Forest and computes feature contribution values.
-
-## 16.7 Run walk-forward validation
-
+### 17.6 Advanced version — walk-forward validation
 ```bash
 python src/validation.py
 ```
+Runs the rolling-origin validation described in Section 14.2 and reports average MAE/RMSE across folds plus their spread.
 
-This performs repeated expanding-window validation and reports average MAE across folds.
-
-## 16.8 Run out-of-time testing
-
+### 17.7 Advanced version — out-of-time test
 ```bash
 python src/out_of_time_test.py
 ```
+Freezes a model on your historical cutoff, evaluates it on genuinely later data (Section 14.3), then retrains a production model on the full expanded dataset. Requires a second, later data extract to be present.
 
-This evaluates a frozen historical model on later data and then retrains a production model on the expanded dataset.
-
----
-
-## 17. Important modeling caveats
-
-This project is useful, but it also has real limitations.
-
-### 17.1 Extreme spikes are hard to forecast
-
-Conflict fatalities are heavily right-skewed, with many low or zero weeks and occasional enormous spikes. Tree-based methods can struggle to extrapolate beyond the range seen in training.
-
-### 17.2 Non-stationarity
-
-Conflict dynamics change over time due to war escalation, ceasefires, political shocks, and shifts in reporting. A model trained on one period may not generalize perfectly to another.
-
-### 17.3 Missing variables
-
-This system uses only recent historical conflict patterns. It does not directly incorporate:
-
-- political context
-- economic indicators
-- diplomatic events
-- troop movement
-- rebel organization changes
-- sanctions and aid flows
-
-Because of that, the model is best understood as a pattern-based forecasting system, not a full geopolitical simulator.
-
-### 17.4 Country-level smoothing
-
-The main pipeline aggregates to country-week. That makes the model much easier to build and interpret, but it also hides within-country regional variation.
-
-This is one reason the repository includes the ADMIN1 spatial extension.
-
----
-
-## 18. What results should you expect
-
-The project is designed to produce a leaderboard showing comparisons such as:
-
-- Naive Baseline
-- Ridge Regression
-- Random Forest
-- optionally XGBoost / LightGBM / Tweedie models
-
-The exact numbers depend on your dataset and split. The expected pattern is that:
-
-- naive is a strong benchmark
-- Ridge is useful but often limited
-- Random Forest often captures nonlinear structure well
-- advanced models may improve over the baseline depending on the dataset and feature design
-
-The repo contains the code needed to compute and compare these results explicitly.
-
----
-
-## 19. Practical interpretation of the project
-
-This project is best understood as a pipeline for answering a very specific forecasting question:
-
-“Can recent conflict history be used to predict next week’s fatalities at a useful level of accuracy?”
-
-The answer is not assumed up front. The code is built to test that directly.
-
-The repository therefore does two things at once:
-
-1. It provides a practical forecasting workflow.
-2. It creates a rigorous comparison between simple and more expressive models.
-
-That makes it a strong learning project and a good foundation for a more advanced portfolio system later.
-
----
-
-## 20. Recommended reading order
-
-If you are new to this repo, read the files in this order:
-
-1. `src/data_processing.py`
-2. `src/features.py`
-3. `src/models.py`
-4. `src/split.py`
-5. `src/evaluations.py`
-6. `src/risk_classifier.py`
-7. `src/validation.py`
-8. `src/spatial_modeling.py`
-9. `src/SHAP_explain.py`
-10. `app/app.py`
-
-That sequence follows the natural workflow of the repository from raw data to prediction to interpretation.
-
----
-
-## 21. Project status and notes
-
-This repository contains both:
-
-- the original capstone-style implementation
-- additional exploratory and portfolio-style extensions
-
-The current codebase reflects a practical, research-oriented pipeline rather than a single hardcoded notebook.
-
-A few implementation notes:
-
-- the project expects ACLED-like CSV input files in `data/raw-data/`
-- the dashboard expects a processed parquet file in `data/processed/`
-- the out-of-time workflow is optional and depends on additional post-March-2026 data being present
-- some advanced scripts require extra packages beyond the base requirements file
-
----
-
-## 22. Quick start summary
-
-If you want the shortest possible path:
-
+### 17.8 Advanced version — explainability
 ```bash
-python -m venv ml_env
-source ml_env/bin/activate   # or ml_env\Scripts\activate on Windows
+python src/SHAP_explain.py
+```
+Trains (or loads) a tree model and computes exact TreeSHAP values (Section 12) — produces both a global summary plot and per-prediction breakdowns.
+
+### 17.9 Advanced version — spatial modeling
+```bash
+python src/spatial_modeling.py
+```
+Builds the ADMIN1×WEEK panel and computes the haversine-based spatial lag feature (Section 13).
+
+### 17.10 Dashboard
+```bash
+python src/dashboard_data.py     # generates data/processed/latest_forecast.parquet
+streamlit run app/app.py         # launches the interactive dashboard
+```
+
+### 17.11 Fastest end-to-end path (quick start)
+```bash
+python -m venv ml_env && source ml_env/bin/activate
 pip install -r requirements.txt
 python src/evaluations.py
 python src/risk_classifier.py
@@ -795,21 +606,36 @@ python src/dashboard_data.py
 streamlit run app/app.py
 ```
 
-That gives you the core forecasting workflow, the risk layer, and the dashboard in a runnable form.
+---
+
+## 18. Project Development Timeline
+
+This project was built in two stages, each intentionally scoped to prove the previous stage was correct before adding complexity:
+
+**Stage 1 — Core capstone system:** raw ACLED data → country-week aggregation and zero-filled panel → lag/rolling feature engineering → chronological (not random) train/test split → naive baseline vs. Ridge vs. Random Forest → honest MAE/RMSE comparison → error analysis → documented README. Two real mistakes were caught and fixed during this stage: shifting the raw event log before aggregation (Section 3.1), and splitting by row order instead of by date (Section 8.2).
+
+**Stage 2 — Portfolio/advanced extensions:** walk-forward validation to test stability across time regimes → a frozen-model out-of-time test against genuinely future data → gradient boosting (XGBoost/LightGBM) and a Tweedie objective to better match the zero-inflated skewed target → a country-calibrated risk classification layer → SHAP explainability for per-prediction transparency → an ADMIN1-level spatial extension with a haversine-based spatial lag feature → a Streamlit dashboard for interactive delivery.
+
+Both stages remain runnable independently (Section 17.3–17.4 for the core system, 17.5–17.9 for the extensions) — the advanced stage does not replace the core pipeline, it builds on top of it.
 
 ---
 
-## 23. Final takeaway
+## 19. Future Work
 
-This repository is a complete conflict forecasting project that combines:
+- Bias-correct the log-target back-transformation (smearing estimator).
+- Extend the risk classifier into a multi-level severity scale rather than a binary flag.
+- Incorporate genuinely exogenous predictors (economic indicators, political-event calendars) where available.
+- Formal leave-one-region-out spatial validation, reported separately from temporal validation (Section 13.5).
+- Automate scheduled ACLED ingestion — pending verification of ACLED's terms of use for programmatic access.
+- Hyperparameter tuning (e.g., Optuna) for the gradient boosting models once the current comparison ladder is stable.
 
-- data engineering
-- temporal feature design
-- classical and ensemble machine learning
-- risk classification
-- spatial spillover features
-- explainability
-- time-series validation
-- dashboard delivery
+---
 
-In short, it is a full end-to-end machine learning system for predicting next-week conflict fatalities and operational risk in the Middle East using historical event data.
+## 20. Further Reading
+
+- Breiman, L. (2001). *Random Forests.* Machine Learning, 45(1).
+- Friedman, J. H. (2001). *Greedy Function Approximation: A Gradient Boosting Machine.* Annals of Statistics.
+- Lundberg, S. & Lee, S-I. (2017). *A Unified Approach to Interpreting Model Predictions* (SHAP). NeurIPS.
+- Tweedie, M. C. K. (1984). *An index which distinguishes between some important exponential families.*
+- Hyndman, R. J. & Athanasopoulos, G. — *Forecasting: Principles and Practice* (walk-forward/rolling-origin validation reference).
+- ACLED (Armed Conflict Location & Event Data Project) — [acleddata.com](https://acleddata.com) — data source and methodology documentation.
