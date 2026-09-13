@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+ml_env/
+.ipynb_checkpoints/
+data/processed/
+data/raw-data/*.csv
+data/raw-data/*.xlsx
+conflict_forecast_v1.md
+conflict_forecast_v2.md
