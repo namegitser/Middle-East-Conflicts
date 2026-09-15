@@ -6,6 +6,7 @@ A complete, reproducible machine-learning system for forecasting **next-week con
 
 This README documents not just *what* the code does, but *why* every technical decision was made — the statistics, the ML theory, and the math behind each choice — so that the repository is self-contained as both a working system and a study reference.
 
+Deployed - https://middle-east-conflicts-tt3ifbhpoagvwfc9dd4qor.streamlit.app/
 ---
 
 ## Table of Contents

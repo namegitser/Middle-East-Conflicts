@@ -52,7 +52,7 @@ with tab_country:
     title=f"Actual vs Predicted in {country}",
     color_discrete_map={
         "FATALITIES": "red",               # Use standard color names
-        "predicted_fatalities": "#001EFF"  # Or use HEX codes
+        "predicted_fatalities": "#FFFB00"  # Or use HEX codes
                         }
             )
     st.plotly_chart(fig, use_container_width=True)
