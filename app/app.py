@@ -21,7 +21,7 @@ except Exception as e:
     st.stop()
 
 tab_overview, tab_map, tab_country, tab_table = st.tabs(
-    ["Overview", "Map", "Country Analysis", "Forecast Table (Last Week)"]
+    ["Overview", "Map", "Country Analysis", "Forecast Table"]
 )
 
 with tab_overview:
@@ -58,9 +58,18 @@ with tab_country:
     st.plotly_chart(fig, use_container_width=True)
 
 with tab_table:
+    # 1. Get the last row per country
+    table_df = data.groupby("COUNTRY", as_index=False).last()
+    
+    # 2. Rename the columns using a dictionary
+    table_df = table_df.rename(columns={
+        "predicted_fatalities": "predicted_fatalities (next_week)",
+        "FATALITIES": "actual_fatalities (last_week)"
+    })
+    
+    # 3. Display the dataframe, sorting by the NEW column name
     st.dataframe(
-        data.groupby("COUNTRY", as_index=False)
-            .last()[["COUNTRY", "predicted_fatalities", "FATALITIES"]]
-            .sort_values("predicted_fatalities", ascending=False),
+        table_df[["COUNTRY", "predicted_fatalities (next_week)", "actual_fatalities (last_week)"]]
+        .sort_values("predicted_fatalities (next_week)", ascending=False),
         use_container_width=True
     )
