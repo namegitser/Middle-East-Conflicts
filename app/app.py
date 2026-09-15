@@ -21,7 +21,7 @@ except Exception as e:
     st.stop()
 
 tab_overview, tab_map, tab_country, tab_table = st.tabs(
-    ["Overview", "Map", "Country Analysis", "Forecast Table"]
+    ["Overview", "Map", "Country Analysis", "Forecast Table (Last Week)"]
 )
 
 with tab_overview:
@@ -45,7 +45,17 @@ with tab_map:
 with tab_country:
     country = st.selectbox("Select Country", sorted(data["COUNTRY"].unique()))
     cdf = data[data["COUNTRY"] == country]
-    st.plotly_chart(px.line(cdf, x="WEEK", y=["FATALITIES", "predicted_fatalities"], title=f"Actual vs Predicted in {country}"), use_container_width=True)
+    fig = px.line(
+    cdf, 
+    x="WEEK", 
+    y=["FATALITIES", "predicted_fatalities"], 
+    title=f"Actual vs Predicted in {country}",
+    color_discrete_map={
+        "FATALITIES": "red",               # Use standard color names
+        "predicted_fatalities": "#001EFF"  # Or use HEX codes
+                        }
+            )
+    st.plotly_chart(fig, use_container_width=True)
 
 with tab_table:
     st.dataframe(
